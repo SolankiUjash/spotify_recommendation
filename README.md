@@ -198,7 +198,7 @@ Modify the `generation_config` in the `GeminiAgent.__init__` method:
 
 ```python
 generation_config={
-    "temperature": 0.9,  # Higher = more creative
+    "temperature": 0.6,  # Higher = more creative
     "top_p": 0.95,
     "top_k": 40,
     "max_output_tokens": 2048,
