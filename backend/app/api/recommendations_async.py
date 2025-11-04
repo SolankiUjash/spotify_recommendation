@@ -1,7 +1,7 @@
 """Async Recommendations API endpoints with streaming support"""
 
 import logging
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
 from typing import Optional
 import asyncio
 
@@ -50,28 +50,42 @@ def get_spotify_client(access_token: Optional[str] = None) -> SpotifyClientAsync
     )
 
 
-def get_spotify_sync_client():
-    """Get sync Spotify client for queue operations"""
-    oauth = SpotifyOAuth(
-        client_id=settings.spotify_client_id,
-        client_secret=settings.spotify_client_secret,
-        redirect_uri=settings.spotify_redirect_uri,
-        scope="user-modify-playback-state user-read-playback-state",
-        cache_path=".cache-spotify",
-        open_browser=False,
-    )
-    return spotipy.Spotify(auth_manager=oauth)
+def get_spotify_sync_client_from_cookies(request: Request):
+    """Create a Spotipy client using tokens from user cookies (multi-user safe)."""
+    access = request.cookies.get("spotify_access_token")
+    refresh = request.cookies.get("spotify_refresh_token")
+    expires_at = request.cookies.get("spotify_expires_at")
+
+    # If access missing but refresh present, attempt refresh
+    if not access and refresh:
+        try:
+            oauth = SpotifyOAuth(
+                client_id=settings.spotify_client_id,
+                client_secret=settings.spotify_client_secret,
+                redirect_uri=settings.spotify_redirect_uri,
+                scope="user-modify-playback-state user-read-playback-state",
+            )
+            token_info = oauth.refresh_access_token(refresh)
+            access = token_info.get("access_token")
+        except Exception:
+            access = None
+
+    if not access:
+        # No tokens available for this user
+        raise HTTPException(status_code=401, detail="Not authenticated with Spotify. Visit /api/v1/spotify/login")
+
+    return spotipy.Spotify(auth=access)
 
 
 @router.post("/recommendations-async", response_model=RecommendationResponse)
-async def get_recommendations_async(request: RecommendationRequest):
+async def get_recommendations_async(request: RecommendationRequest, http_request: Request):
     """
     Get song recommendations (fully async version)
     
     - Resolves the seed song on Spotify
     - Gets AI-powered recommendations from Gemini
     - Batch verifies recommendations (single LLM call)
-    - Auto-adds accepted tracks to Spotify queue
+    - Returns matched tracks (no automatic queueing)
     - Returns matched tracks from Spotify
     
     All operations run concurrently for maximum speed.
@@ -87,7 +101,31 @@ async def get_recommendations_async(request: RecommendationRequest):
         # Step 1: Resolve seed track
         seed_track_data = await spotify.resolve_track(request.seed_song)
         if not seed_track_data:
-            raise HTTPException(status_code=404, detail=f"Could not find '{request.seed_song}' on Spotify")
+            # Fallback 1: try Spotipy textual search (cookies-based client)
+            try:
+                spotify_sync_fallback = get_spotify_sync_client_from_cookies(http_request)
+                search_res = spotify_sync_fallback.search(q=request.seed_song, type='track', limit=1)
+                items = search_res.get('tracks', {}).get('items', [])
+                if items:
+                    seed_track_data = items[0]
+            except Exception:
+                seed_track_data = None
+        if not seed_track_data:
+            # Fallback 2: detect Spotify track URL/URI and fetch by id
+            try:
+                text = request.seed_song.strip()
+                track_id = None
+                if 'open.spotify.com/track/' in text:
+                    track_id = text.split('open.spotify.com/track/')[1].split('?')[0].split('/')[0]
+                elif text.startswith('spotify:track:'):
+                    track_id = text.split('spotify:track:')[1]
+                if track_id:
+                    spotify_sync_fallback = get_spotify_sync_client_from_cookies(http_request)
+                    seed_track_data = spotify_sync_fallback.track(track_id)
+            except Exception:
+                seed_track_data = None
+        if not seed_track_data:
+            raise HTTPException(status_code=404, detail=f"Could not find '{request.seed_song}' on Spotify. Try selecting from suggestions.")
         
         # Extract seed info
         seed_track_name = seed_track_data["name"]
@@ -128,34 +166,7 @@ async def get_recommendations_async(request: RecommendationRequest):
                 resolved_tracks
             )
         
-        # Step 5: Ensure active device and build recommendations
-        spotify_sync = get_spotify_sync_client()
-        
-        # Check for active device and try to activate one
-        try:
-            devices = spotify_sync.devices()
-            active_device = None
-            for device in devices.get("devices", []):
-                if device.get("is_active"):
-                    active_device = device
-                    break
-            
-            if not active_device and devices.get("devices"):
-                # Try to activate the first available device
-                first_device = devices["devices"][0]
-                device_id = first_device["id"]
-                logger.info(f"No active device found. Attempting to activate: {first_device['name']}")
-                try:
-                    spotify_sync.start_playback(device_id=device_id)
-                    active_device = first_device
-                    logger.info(f"Successfully activated device: {first_device['name']}")
-                except Exception as device_exc:
-                    logger.warning(f"Failed to activate device: {device_exc}")
-            
-            if not active_device:
-                logger.warning("No active Spotify device found. Songs will not be added to queue.")
-        except Exception as device_exc:
-            logger.warning(f"Failed to check/activate devices: {device_exc}")
+        # Step 5: Build recommendations (no auto-queue)
         
         recommendations = []
         rejected_count = 0
@@ -170,15 +181,7 @@ async def get_recommendations_async(request: RecommendationRequest):
                 rejected_count += 1
                 continue
             
-            # Auto-add to Spotify queue
             in_queue = False
-            try:
-                spotify_sync.add_to_queue(track["uri"])
-                added_to_queue_count += 1
-                in_queue = True
-                logger.info(f"Added to queue: {track['name']}")
-            except Exception as queue_exc:
-                logger.warning(f"Failed to add to queue: {queue_exc}")
             
             # Build recommendation object
             rec_artists = [artist["name"] for artist in track.get("artists", [])]
@@ -211,7 +214,7 @@ async def get_recommendations_async(request: RecommendationRequest):
             })
         
         verified_count = len(recommendations)
-        logger.info(f"[ASYNC] Added {added_to_queue_count} tracks to Spotify queue")
+        logger.info("[ASYNC] Returned suggestions without queueing")
         
         # Build seed track response
         seed_album_images = seed_track_data.get("album", {}).get("images", [])

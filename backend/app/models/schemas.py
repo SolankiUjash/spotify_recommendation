@@ -41,6 +41,7 @@ class RecommendationRequest(BaseModel):
     seed_song: str = Field(..., description="Seed song name or 'Title by Artist'")
     count: int = Field(5, ge=1, description="Number of recommendations")
     verify: bool = Field(True, description="Enable AI verification")
+    auto_queue: bool = Field(False, description="Automatically add verified tracks to Spotify queue (disabled)")
 
 
 class RecommendationResponse(BaseModel):

@@ -2,12 +2,12 @@
 
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.api import recommendations, spotify_auth, health, recommendations_async, spotify_queue, streaming_recommendations
+from app.api import recommendations, spotify_auth, health, recommendations_async, spotify_queue, streaming_recommendations, spotify_search
 
 # Configure logging
 logging.basicConfig(
@@ -55,6 +55,7 @@ app.include_router(recommendations_async.router, prefix=settings.api_v1_prefix, 
 app.include_router(streaming_recommendations.router, prefix=settings.api_v1_prefix, tags=["streaming"])
 app.include_router(spotify_auth.router, prefix=settings.api_v1_prefix, tags=["spotify-auth"])
 app.include_router(spotify_queue.router, prefix=f"{settings.api_v1_prefix}/spotify", tags=["spotify-queue"])
+app.include_router(spotify_search.router, prefix=f"{settings.api_v1_prefix}/spotify", tags=["spotify-search"])
 
 
 @app.exception_handler(Exception)
@@ -77,6 +78,17 @@ async def root():
         "docs": "/docs",
         "api": settings.api_v1_prefix
     }
+
+
+@app.get("/callback")
+async def spotify_callback_redirect(request: Request, code: str, state: str = None):
+    """Forward Spotify callback to API endpoint (must preserve ability to set cookies)"""
+    from fastapi import Response
+    from app.api.spotify_auth import spotify_callback_get
+    # Call the actual handler directly instead of redirecting
+    # This preserves the ability to set cookies in the response
+    response = Response()
+    return await spotify_callback_get(request, response, code, state)
 
 
 if __name__ == "__main__":

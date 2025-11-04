@@ -7,7 +7,7 @@ const TrackCardSimple = ({ recommendation, index }) => {
 
   return (
     <div 
-      className="group relative overflow-hidden rounded-2xl bg-gradient-to-b from-white/5 to-white/0 hover:bg-white/10 border border-white/5 hover:border-white/20 backdrop-blur-sm transition-all duration-300 hover:scale-105 hover:shadow-2xl hover:shadow-spotify-green/10"
+      className="group relative overflow-hidden rounded-2xl bg-gradient-to-b from-white/5 to-white/0 sm:hover:bg-white/10 border border-white/5 sm:hover:border-white/20 backdrop-blur-sm transition-all duration-300 sm:hover:scale-105 sm:hover:shadow-2xl sm:hover:shadow-spotify-green/10"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       style={{
@@ -64,12 +64,12 @@ const TrackCardSimple = ({ recommendation, index }) => {
       </div>
 
       {/* Track Info */}
-      <div className="p-5">
-        <h3 className="text-white font-bold text-base mb-1 truncate group-hover:text-spotify-green transition-colors">
+      <div className="p-4 sm:p-5">
+        <h3 className="text-white font-bold text-lg sm:text-base mb-1 truncate group-hover:text-spotify-green transition-colors">
           {track.name}
         </h3>
         
-        <p className="text-gray-400 text-sm mb-3 truncate">
+        <p className="text-gray-400 text-sm sm:text-sm text-xs mb-3 truncate">
           {Array.isArray(track.artists) ? track.artists.join(', ') : track.artists}
         </p>
 
@@ -84,8 +84,16 @@ const TrackCardSimple = ({ recommendation, index }) => {
 
         {/* AI Reason - Show on hover */}
         {isHovered && suggestion?.reason && (
-          <div className="mb-3 p-3 rounded-xl bg-black/40 border border-white/10 animate-fade-in">
+          <div className="hidden sm:block mb-3 p-3 rounded-xl bg-black/40 border border-white/10 animate-fade-in">
             <p className="text-xs text-gray-300 leading-relaxed line-clamp-3">
+              {suggestion.reason}
+            </p>
+          </div>
+        )}
+
+        {suggestion?.reason && (
+          <div className="sm:hidden mb-3 p-3 rounded-xl bg-black/40 border border-white/10">
+            <p className="text-xs text-gray-300 leading-relaxed line-clamp-4">
               {suggestion.reason}
             </p>
           </div>
@@ -98,7 +106,7 @@ const TrackCardSimple = ({ recommendation, index }) => {
               href={`https://open.spotify.com/track/${track.id}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-spotify-green/50 transition-all hover:scale-105 active:scale-95"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-spotify-green/50 transition-all sm:hover:scale-105 active:scale-95"
             >
               <ExternalLink className="w-4 h-4 text-white" />
               <span className="text-sm font-medium text-white">Open in Spotify</span>

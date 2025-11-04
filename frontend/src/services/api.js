@@ -1,12 +1,23 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+function resolveApiBaseUrl() {
+  const envUrl = import.meta.env.VITE_API_URL;
+  if (envUrl) return envUrl.replace(/\/$/, '');
+  if (typeof window !== 'undefined' && window.location) {
+    const origin = window.location.origin;
+    return `${origin}/api/v1`;
+  }
+  return 'http://localhost:8000/api/v1';
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: true,
 });
 
 export const recommendationsAPI = {
@@ -66,25 +77,25 @@ export const spotifyAPI = {
   },
 
   /**
+   * Search for tracks on Spotify
+   * @param {string} query - Search query
+   * @param {number} limit - Number of results (default: 10)
+   * @returns {Promise} Search results
+   */
+  async searchTracks(query, limit = 10) {
+    const response = await api.get('/spotify/search', {
+      params: { q: query, limit },
+    });
+    return response.data;
+  },
+
+  /**
    * Add track to Spotify queue
    * @param {string} trackUri - Spotify track URI
    * @returns {Promise} Response
    */
   async addToQueue(trackUri) {
     const response = await api.post('/spotify/queue/add', { track_uri: trackUri });
-    return response.data;
-  },
-
-  /**
-   * Remove track from Spotify queue (not directly supported by Spotify API)
-   * This is a placeholder - actual implementation would need to skip the track
-   * @param {string} trackUri - Spotify track URI
-   * @returns {Promise} Response
-   */
-  async removeFromQueue(trackUri) {
-    // Note: Spotify doesn't support removing specific tracks from queue
-    // This would need custom implementation
-    const response = await api.post('/spotify/queue/remove', { track_uri: trackUri });
     return response.data;
   },
 };

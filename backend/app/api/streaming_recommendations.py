@@ -2,7 +2,7 @@
 
 import logging
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 import json
@@ -39,17 +39,26 @@ def get_verifier_agent() -> VerifierAgentAsync:
     return _verifier_agent
 
 
-def get_spotify_sync_client():
-    """Get sync Spotify client for queue operations"""
-    oauth = SpotifyOAuth(
-        client_id=settings.spotify_client_id,
-        client_secret=settings.spotify_client_secret,
-        redirect_uri=settings.spotify_redirect_uri,
-        scope="user-modify-playback-state user-read-playback-state",
-        cache_path=".cache-spotify",
-        open_browser=False,
-    )
-    return spotipy.Spotify(auth_manager=oauth)
+def get_spotify_sync_client_from_cookies(request):
+    """Create Spotipy client using per-user cookies (multi-user safe)."""
+    from fastapi import HTTPException
+    access = request.cookies.get("spotify_access_token") if hasattr(request, 'cookies') else None
+    refresh = request.cookies.get("spotify_refresh_token") if hasattr(request, 'cookies') else None
+    if not access and refresh:
+        try:
+            oauth = SpotifyOAuth(
+                client_id=settings.spotify_client_id,
+                client_secret=settings.spotify_client_secret,
+                redirect_uri=settings.spotify_redirect_uri,
+                scope="user-modify-playback-state user-read-playback-state",
+            )
+            token_info = oauth.refresh_access_token(refresh)
+            access = token_info.get("access_token")
+        except Exception:
+            access = None
+    if not access:
+        raise HTTPException(status_code=401, detail="Not authenticated with Spotify")
+    return spotipy.Spotify(auth=access)
 
 
 async def verify_in_background(
@@ -82,7 +91,7 @@ async def verify_in_background(
 
 
 @router.post("/stream-and-queue")
-async def stream_recommendations_and_queue(request: RecommendationRequest):
+async def stream_recommendations_and_queue(request: RecommendationRequest, http_request: Request):
     """
     Stream recommendations from Gemini, automatically add to Spotify queue,
     and verify in background.
@@ -107,7 +116,46 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
                 client_secret=settings.spotify_client_secret,
                 redirect_uri=settings.spotify_redirect_uri
             )
-            spotify_sync = get_spotify_sync_client()
+            # Use per-user cookie auth for queue ops
+            spotify_sync = get_spotify_sync_client_from_cookies(http_request)
+            
+            # Ensure active device before queueing (with retries)
+            active_device_id = None
+            try:
+                retries = 5
+                for attempt in range(retries):
+                    devices = spotify_sync.devices()
+                    active_device = None
+                    for device in devices.get("devices", []):
+                        if device.get("is_active"):
+                            active_device = device
+                            break
+                    if active_device:
+                        active_device_id = active_device["id"]
+                        logger.info(f"[STREAM] Active device found: {active_device['name']}")
+                        break
+                    available = devices.get("devices", [])
+                    if available:
+                        first_device = available[0]
+                        active_device_id = first_device["id"]
+                        logger.info(f"[STREAM] Activating device: {first_device['name']}")
+                        try:
+                            spotify_sync.transfer_playback(device_id=active_device_id, force_play=False)
+                            logger.info("[STREAM] Transfer requested; waiting for device to become active...")
+                        except Exception as device_exc:
+                            logger.warning(f"[STREAM] Failed to transfer playback: {device_exc}")
+                            active_device_id = None
+                    else:
+                        yield f"data: {json.dumps({'type': 'status', 'message': 'No Spotify device visible yet. Open Spotify on your phone and try again...'})}\n\n"
+                    await asyncio.sleep(2)
+                if not active_device_id:
+                    logger.warning("[STREAM] No Spotify devices available after retries")
+                    yield f"data: {json.dumps({'type': 'error', 'error': 'No Spotify device found. Open Spotify on your phone/computer and play any song once, then retry.'})}\n\n"
+                    return
+            except Exception as device_exc:
+                logger.warning(f"[STREAM] Failed to check devices: {device_exc}")
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Failed to connect to Spotify. Please make sure Spotify is running.'})}\n\n"
+                return
             
             # Send initial status
             yield f"data: {json.dumps({'type': 'status', 'message': 'Searching for seed song...'})}\n\n"
@@ -115,7 +163,31 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
             # Step 1: Resolve seed track
             seed_track_data = await spotify_async.resolve_track(request.seed_song)
             if not seed_track_data:
-                yield f"data: {json.dumps({'type': 'error', 'error': f'Could not find {request.seed_song} on Spotify'})}\n\n"
+                # Fallback 1: Spotipy text search
+                try:
+                    spotify_sync_fb = get_spotify_sync_client_from_cookies(http_request)
+                    sr = spotify_sync_fb.search(q=request.seed_song, type='track', limit=1)
+                    items = sr.get('tracks', {}).get('items', [])
+                    if items:
+                        seed_track_data = items[0]
+                except Exception:
+                    seed_track_data = None
+            if not seed_track_data:
+                # Fallback 2: parse URL/URI and fetch by id
+                try:
+                    text = request.seed_song.strip()
+                    track_id = None
+                    if 'open.spotify.com/track/' in text:
+                        track_id = text.split('open.spotify.com/track/')[1].split('?')[0].split('/')[0]
+                    elif text.startswith('spotify:track:'):
+                        track_id = text.split('spotify:track:')[1]
+                    if track_id:
+                        spotify_sync_fb = get_spotify_sync_client_from_cookies(http_request)
+                        seed_track_data = spotify_sync_fb.track(track_id)
+                except Exception:
+                    seed_track_data = None
+            if not seed_track_data:
+                yield f"data: {json.dumps({'type': 'error', 'error': f"Could not find '{request.seed_song}' on Spotify. Try selecting from suggestions."})}\n\n"
                 return
             
             seed_track_name = seed_track_data["name"]
@@ -137,7 +209,7 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
             
             yield f"data: {json.dumps({'type': 'status', 'message': f'Got {len(suggestions)} suggestions, processing...'})}\n\n"
             
-            # Step 3: Process each suggestion - resolve and queue
+            # Step 3: Process each suggestion - resolve (queue later after verification)
             resolved_tracks = []
             added_count = 0
             
@@ -149,16 +221,7 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
                         yield f"data: {json.dumps({'type': 'skip', 'data': {'title': suggestion.title, 'reason': 'Not found on Spotify'}})}\n\n"
                         continue
                     
-                    # Add to queue immediately
-                    try:
-                        spotify_sync.add_to_queue(track["uri"])
-                        added_count += 1
-                        logger.info(f"Added to queue: {track['name']}")
-                    except Exception as queue_exc:
-                        logger.warning(f"Failed to add to queue: {queue_exc}")
-                        # Continue anyway
-                    
-                    # Save for batch verification
+                    # Save for batch verification and possible later queueing
                     resolved_tracks.append((suggestion, track))
                     
                     # Build track data
@@ -180,7 +243,7 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
                             "image_url": image_url,
                             "genre": suggestion.genre,
                             "reason": suggestion.reason,
-                            "added_to_queue": True,
+                            "added_to_queue": False,
                             "verification_pending": True
                         }
                     }
@@ -190,7 +253,7 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
                     logger.error(f"Error processing suggestion: {exc}")
                     yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
             
-            # Batch verification in background (single API call)
+            # Batch verification (single API call)
             if resolved_tracks:
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Running batch verification (1 API call)...'})}\n\n"
                 
@@ -209,6 +272,18 @@ async def stream_recommendations_and_queue(request: RecommendationRequest):
                             rejected_count += 1
                             yield f"data: {json.dumps({'type': 'verification', 'data': {'track_id': track['id'], 'valid': False, 'reason': verification.reason}})}\n\n"
                         else:
+                            # Queue ONLY verified tracks now
+                            try:
+                                if active_device_id:
+                                    spotify_sync.add_to_queue(track["uri"], device_id=active_device_id)
+                                else:
+                                    spotify_sync.add_to_queue(track["uri"])
+                                added_count += 1
+                                yield f"data: {json.dumps({'type': 'queued', 'data': {'track_id': track['id'], 'uri': track['uri']}})}\n\n"
+                                logger.info(f"[STREAM] Queued (verified): {track['name']}")
+                            except Exception as queue_exc:
+                                logger.warning(f"[STREAM] Failed to queue verified track: {queue_exc}")
+                            # Notify verification result
                             yield f"data: {json.dumps({'type': 'verification', 'data': {'track_id': track['id'], 'valid': True, 'confidence': verification.confidence_score}})}\n\n"
                 except Exception as verify_exc:
                     logger.warning(f"Batch verification error: {verify_exc}")

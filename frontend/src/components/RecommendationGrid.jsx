@@ -2,7 +2,7 @@ import React from 'react';
 import TrackCard from './TrackCard';
 import TrackCardSimple from './TrackCardSimple';
 
-const RecommendationGrid = ({ recommendations, onAddToQueue, onRemoveFromQueue, hideQueueButtons }) => {
+const RecommendationGrid = ({ recommendations, onAddToQueue, hideQueueButtons }) => {
   if (!recommendations || recommendations.length === 0) {
     return (
       <div className="text-center py-12 px-6 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-sm">
@@ -14,14 +14,13 @@ const RecommendationGrid = ({ recommendations, onAddToQueue, onRemoveFromQueue, 
   const CardComponent = hideQueueButtons ? TrackCardSimple : TrackCard;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6">
       {recommendations.map((rec, index) => (
         <CardComponent 
           key={rec.track?.id || index} 
           recommendation={rec}
           index={index}
           onAddToQueue={onAddToQueue}
-          onRemoveFromQueue={onRemoveFromQueue}
         />
       ))}
     </div>
